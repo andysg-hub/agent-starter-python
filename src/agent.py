@@ -13,8 +13,75 @@ from livekit.agents import (
     inference,
     metrics,
 )
+from livekit.agents.llm.mcp import MCPServerStdio
 from livekit.plugins import noise_cancellation, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
+
+# ================================================================
+# Base assistant behaviour + Calendar tool guidance
+# ================================================================
+
+YOUR_BASE_INSTRUCTIONS = """
+You are a natural, conversational AI voice assistant.
+Keep responses concise, friendly, and easy to follow.
+Assume the user is speaking naturally, not issuing formal commands.
+Use context to infer meaning.
+Confirm important actions.
+"""
+
+CALENDAR_TOOL_GUIDANCE = """
+You have Google Calendar tools available through the MCP integration.
+Use them for any scheduling or calendar-related task.
+
+All times you send to these tools must be RFC3339/ISO 8601 strings in UTC.
+Assume the user's local timezone is Europe/London unless stated otherwise
+and convert to UTC.
+
+TOOLS (exact names & arguments):
+
+1) list-calendars()
+   - No input.
+   - Use this to find available calendars. Prefer 'primary' if suitable.
+
+2) list-events({
+     calendarId: string,
+     timeMin?: string (ISO/RFC3339 UTC),
+     timeMax?: string (ISO/RFC3339 UTC)
+   })
+
+3) create-event({
+     calendarId: string,
+     summary: string,
+     start: string (ISO/RFC3339 UTC),
+     end: string (ISO/RFC3339 UTC),
+     description?: string,
+     location?: string,
+     attendees?: [{ email: string }]
+   })
+
+4) update-event({
+     calendarId: string,
+     eventId: string,
+     summary?: string,
+     description?: string,
+     start?: string (ISO/RFC3339 UTC),
+     end?: string (ISO/RFC3339 UTC),
+     location?: string,
+     attendees?: [{ email: string }]
+   })
+
+5) delete-event({
+     calendarId: string,
+     eventId: string
+   })
+
+Rules:
+- Always resolve a concrete calendarId (use 'primary' or match by summary).
+- Default meeting length to 30 minutes if the user gives only a start time.
+- Ask exactly one clarifying question if key info is missing (e.g. start time).
+- After creating/updating/deleting an event, confirm the result in natural language.
+- Be polite, concise, and conversational.
+"""
 
 logger = logging.getLogger("agent")
 
@@ -24,10 +91,7 @@ load_dotenv(".env.local")
 class Assistant(Agent):
     def __init__(self) -> None:
         super().__init__(
-            instructions="""You are a helpful voice AI assistant. The user is interacting with you via voice, even if you perceive the conversation as text.
-            You eagerly assist users with their questions by providing information from your extensive knowledge.
-            Your responses are concise, to the point, and without any complex formatting or punctuation including emojis, asterisks, or other symbols.
-            You are curious, friendly, and have a sense of humor.""",
+            instructions=YOUR_BASE_INSTRUCTIONS + "\n\n" + CALENDAR_TOOL_GUIDANCE,
         )
 
     # To add tools, use the @function_tool decorator.
@@ -59,6 +123,13 @@ async def entrypoint(ctx: JobContext):
         "room": ctx.room.name,
     }
 
+    # Point this to your local calendar MCP server
+    calendar_mcp = MCPServerStdio(
+        command="node",
+        args=[r"C:\Users\Andy\code\mcp-google-calendar\build\index.js"],
+        cwd=r"C:\Users\Andy\code\mcp-google-calendar",  # good practice on Windows
+    )
+
     # Set up a voice AI pipeline using OpenAI, Cartesia, AssemblyAI, and the LiveKit turn detector
     session = AgentSession(
         # Speech-to-text (STT) is your agent's ears, turning the user's speech into text that the LLM can understand
@@ -79,6 +150,8 @@ async def entrypoint(ctx: JobContext):
         # allow the LLM to generate a response while waiting for the end of turn
         # See more at https://docs.livekit.io/agents/build/audio/#preemptive-generation
         preemptive_generation=True,
+        # 👇 NEW: register your MCP server with the session
+        mcp_servers=[calendar_mcp],
     )
 
     # To use a realtime model instead of a voice pipeline, use the following session setup instead.
